@@ -85,7 +85,7 @@ from agent.model_metadata import (
     fetch_model_metadata,
     estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
     get_next_probe_tier, parse_context_limit_from_error,
-    save_context_length, is_local_endpoint,
+    save_context_length,
 )
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
@@ -1735,74 +1735,6 @@ class AIAgent:
         
         return None
 
-    def _classify_empty_content_response(
-        self,
-        assistant_message,
-        *,
-        finish_reason: Optional[str],
-        approx_tokens: int,
-        api_messages: List[Dict[str, Any]],
-        conversation_history: Optional[List[Dict[str, Any]]],
-    ) -> Dict[str, Any]:
-        """Classify think-only/empty responses so we can retry, compress, or salvage.
-
-        We intentionally do NOT short-circuit all structured-reasoning responses.
-        Prior discussion/PR history shows some models recover on retry. Instead we:
-        - compress immediately when the pattern looks like implicit context pressure
-        - salvage reasoning early when the same reasoning-only payload repeats
-        - otherwise preserve the normal retry path
-        """
-        reasoning_text = self._extract_reasoning(assistant_message)
-        has_structured_reasoning = bool(
-            getattr(assistant_message, "reasoning", None)
-            or getattr(assistant_message, "reasoning_content", None)
-            or getattr(assistant_message, "reasoning_details", None)
-        )
-        content = getattr(assistant_message, "content", None) or ""
-        stripped_content = self._strip_think_blocks(content).strip()
-        signature = (
-            content,
-            reasoning_text or "",
-            bool(has_structured_reasoning),
-            finish_reason or "",
-        )
-        repeated_signature = signature == getattr(self, "_last_empty_content_signature", None)
-
-        compressor = getattr(self, "context_compressor", None)
-        ctx_len = getattr(compressor, "context_length", 0) or 0
-        threshold_tokens = getattr(compressor, "threshold_tokens", 0) or 0
-        is_large_session = bool(
-            (ctx_len and approx_tokens >= max(int(ctx_len * 0.4), threshold_tokens))
-            or len(api_messages) > 80
-        )
-        is_local_custom = is_local_endpoint(getattr(self, "base_url", "") or "")
-        is_resumed = bool(conversation_history)
-        context_pressure_signals = any(
-            [
-                finish_reason == "length",
-                getattr(compressor, "_context_probed", False),
-                is_large_session,
-                is_resumed,
-            ]
-        )
-        should_compress = bool(
-            self.compression_enabled
-            and is_local_custom
-            and context_pressure_signals
-            and not stripped_content
-        )
-
-        self._last_empty_content_signature = signature
-        return {
-            "reasoning_text": reasoning_text,
-            "has_structured_reasoning": has_structured_reasoning,
-            "repeated_signature": repeated_signature,
-            "should_compress": should_compress,
-            "is_local_custom": is_local_custom,
-            "is_large_session": is_large_session,
-            "is_resumed": is_resumed,
-        }
-    
     def _cleanup_task_resources(self, task_id: str) -> None:
         """Clean up VM and browser resources for a given task."""
         try:
@@ -8637,6 +8569,7 @@ class AIAgent:
                             approx_tokens=self.context_compressor.last_prompt_tokens,
                             task_id=effective_task_id,
                         )
+                        self._just_compacted = True
                         # Compression created a new session — clear history so
                         # _flush_messages_to_session_db writes compressed messages
                         # to the new session (see preflight compression comment).
@@ -8678,6 +8611,24 @@ class AIAgent:
                             self._response_was_previewed = True
                             break
 
+                        # Post-compaction empty recovery: if compression just
+                        # happened and the model returns empty, it likely lost
+                        # its train of thought. Inject a continuation prompt
+                        # and retry instead of breaking with (empty).
+                        if getattr(self, '_just_compacted', False):
+                            self._just_compacted = False
+                            logger.info("Empty response after compaction — retrying with continuation prompt")
+                            assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
+                            assistant_msg["content"] = ""
+                            messages.append(assistant_msg)
+                            messages.append({
+                                "role": "user",
+                                "content": "[Context was compacted. Continue your last response to the user.]",
+                            })
+                            self._session_messages = messages
+                            self._save_session_log(messages)
+                            continue
+
                         # Reasoning-only response: the model produced thinking
                         # but no visible content.  This is a valid response —
                         # keep reasoning in its own field and set content to
@@ -8700,6 +8651,7 @@ class AIAgent:
                     # Reset retry counter/signature on successful content
                     if hasattr(self, '_empty_content_retries'):
                         self._empty_content_retries = 0
+                    self._just_compacted = False
                     self._last_empty_content_signature = None
 
                     if (
