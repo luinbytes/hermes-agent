@@ -8768,6 +8768,7 @@ class AIAgent:
                             approx_tokens=self.context_compressor.last_prompt_tokens,
                             task_id=effective_task_id,
                         )
+                        self._just_compacted = True
                         # Compression created a new session — clear history so
                         # _flush_messages_to_session_db writes compressed messages
                         # to the new session (see preflight compression comment).
@@ -8809,12 +8810,28 @@ class AIAgent:
                             self._response_was_previewed = True
                             break
 
-                        # Reasoning-only response: the model produced thinking
-                        # but no visible content.  This is a valid response —
-                        # keep reasoning in its own field and set content to
-                        # "(empty)" so every provider accepts the message.
-                        # No retries needed.
+                        # Post-compaction empty recovery: if compression just
+                        # happened and the model returns empty, it likely lost
+                        # its train of thought. Inject a continuation prompt
+                        # and retry instead of breaking with (empty).
                         reasoning_text = self._extract_reasoning(assistant_message)
+                        if getattr(self, "_just_compacted", False):
+                            self._just_compacted = False
+                            logger.info("Empty response after compaction — retrying with continuation prompt")
+                            assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
+                            assistant_msg["content"] = ""
+                            messages.append(assistant_msg)
+                            messages.append({
+                                "role": "user",
+                                "content": "[Context was compacted. Continue your last response to the user.]",
+                            })
+                            self._session_messages = messages
+                            self._save_session_log(messages)
+                            continue
+
+                        # Reasoning-only response: the model produced thinking
+                        # but no visible content. Keep reasoning in its own field
+                        # and set content to "(empty)" so every provider accepts the message.
                         assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                         assistant_msg["content"] = "(empty)"
                         messages.append(assistant_msg)
@@ -8831,6 +8848,7 @@ class AIAgent:
                     # Reset retry counter/signature on successful content
                     if hasattr(self, '_empty_content_retries'):
                         self._empty_content_retries = 0
+                    self._just_compacted = False
                     self._last_empty_content_signature = None
 
                     if (
