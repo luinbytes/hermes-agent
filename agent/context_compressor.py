@@ -360,13 +360,33 @@ Write only the summary body. Do not include any preamble or prefix."""
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             return self._with_summary_prefix(summary)
-        except RuntimeError:
-            logging.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary.")
-            return None
-        except Exception as e:
-            logging.warning("Failed to generate context summary: %s", e)
-            return None
+        except Exception as primary_err:
+            logger.warning("Primary summary model failed: model=%s error=%s — retrying without model override",
+                           self.summary_model, primary_err)
+            try:
+                # Retry without the explicit model override — call_llm's own
+                # provider resolution will find a working backend (configured
+                # compression model, then openrouter fallback).  This avoids
+                # hardcoding any provider or model in core code.
+                response = call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=summary_budget * 2,
+                )
+                content = response.choices[0].message.content
+                if not isinstance(content, str):
+                    content = str(content) if content else ""
+                summary = content.strip()
+                self._previous_summary = summary
+                logger.info("Summary succeeded on retry via provider routing")
+                return self._with_summary_prefix(summary)
+            except Exception as fallback_err:
+                logger.error("Summary generation failed (primary + retry): "
+                             "model=%s primary_error=%s retry_error=%s — "
+                             "middle turns will be DROPPED WITHOUT SUMMARY (data loss)",
+                             self.summary_model, primary_err, fallback_err)
+                return None
 
     @staticmethod
     def _with_summary_prefix(summary: str) -> str:
@@ -647,8 +667,10 @@ Write only the summary body. Do not include any preamble or prefix."""
             if not _merge_summary_into_tail:
                 compressed.append({"role": summary_role, "content": summary})
         else:
-            if not self.quiet_mode:
-                logger.warning("No summary model available — middle turns dropped without summary")
+            logger.error("Context compression produced no summary — middle turns dropped without "
+                         "summary (DATA LOSS). summary_model=%s. Verify the configured summary "
+                         "model is valid and the API is reachable.",
+                         self.summary_model or "(none)")
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
