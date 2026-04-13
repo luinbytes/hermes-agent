@@ -1814,6 +1814,11 @@ class DiscordAdapter(BasePlatformAdapter):
         )
 
         msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
+        # In shared sessions, prefix slash command text with author name
+        if not self.config.extra.get("group_sessions_per_user", True) and source.chat_type == "group" and interaction.user:
+            author_name = interaction.user.display_name
+            if author_name:
+                text = f"[{author_name}]: {text}"
         return MessageEvent(
             text=text,
             message_type=msg_type,
@@ -2476,6 +2481,12 @@ class DiscordAdapter(BasePlatformAdapter):
         _parent_id = str(getattr(_chan, "parent_id", "") or "")
         _chan_id = str(getattr(_chan, "id", ""))
         _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
+
+        # In shared sessions, prefix with author name so the agent knows who is speaking.
+        if not self.config.extra.get("group_sessions_per_user", True) and source.chat_type == "group" and message.author:
+            author_name = message.author.display_name
+            if author_name:
+                event_text = f"[{author_name}]: {event_text}"
         event = MessageEvent(
             text=event_text,
             message_type=msg_type,
