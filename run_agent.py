@@ -1975,14 +1975,23 @@ class AIAgent:
         """Remove reasoning/thinking blocks from content, returning only visible text."""
         if not content:
             return ""
-        # Strip all reasoning tag variants: <think>, <thinking>, <THINKING>,
-        # <reasoning>, <REASONING_SCRATCHPAD>, <thought> (Gemma 4)
-        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+        # Strip closed reasoning tag variants: 💭...🧠, <thinking>, <reasoning>,
+        # <REASONING_SCRATCHPAD>, <thought> (Gemma 4)
+        content = re.sub(r'💭.*?🧠', '', content, flags=re.DOTALL)
+        # Handle unterminated 💭 blocks (model starts thinking but never emits
+        # 🧠 — common on NIM endpoints, MiniMax M2.7, etc.)
+        content = re.sub(r'💭.*', '', content, flags=re.DOTALL)
         content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
         content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL)
         content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL)
         content = re.sub(r'<thought>.*?</thought>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'</?(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>\s*', '', content, flags=re.IGNORECASE)
+        # Handle unterminated <think... blocks (no closing </think/>)
+        content = re.sub(r'<think\b[^>]*>.*', '', content, flags=re.DOTALL)
+        # Handle unterminated <think with no closing > (model writes <think then
+        # reasoning directly, common on NIM/MiniMax M2.7)
+        content = re.sub(r'<think\b\s.*', '', content, flags=re.DOTALL)
+        # Strip any remaining stray open/close tags
+        content = re.sub(r'</?(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)[^>]*>\s*', '', content, flags=re.IGNORECASE)
         return content
 
     def _looks_like_codex_intermediate_ack(
