@@ -20,6 +20,101 @@ class TestGatewayPidState:
         assert payload["kind"] == "hermes-gateway"
         assert isinstance(payload["argv"], list)
         assert payload["argv"]
+        assert payload["hermes_home"] == str(tmp_path)
+
+    def test_get_running_pid_accepts_matching_hermes_home_record(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        pid_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 123,
+            "hermes_home": str(tmp_path),
+        }))
+
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+        assert status.acquire_gateway_runtime_lock() is True
+        try:
+            assert status.get_running_pid() == os.getpid()
+        finally:
+            status.release_gateway_runtime_lock()
+
+    def test_get_running_pid_rejects_mismatched_hermes_home_record(self, tmp_path, monkeypatch):
+        personal_home = tmp_path / ".hermes"
+        ini_home = tmp_path / ".hermes-iniuria"
+        personal_home.mkdir()
+        ini_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(personal_home))
+        (personal_home / "gateway.pid").write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 123,
+            "hermes_home": str(ini_home),
+        }))
+        (personal_home / "gateway.lock").write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 123,
+            "hermes_home": str(ini_home),
+        }))
+
+        monkeypatch.setattr(status, "is_gateway_runtime_lock_active", lambda lock_path=None: True)
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+        assert status.get_running_pid() is None
+
+    def test_get_running_pid_rejects_legacy_record_from_other_hermes_checkout(self, tmp_path, monkeypatch):
+        personal_home = tmp_path / ".hermes"
+        ini_home = tmp_path / ".hermes-iniuria"
+        personal_home.mkdir()
+        ini_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(personal_home))
+        legacy_record = {
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": [
+                str(ini_home / "hermes-agent" / "hermes_cli" / "main.py"),
+                "gateway",
+                "run",
+            ],
+            "start_time": 123,
+        }
+        (personal_home / "gateway.pid").write_text(json.dumps(legacy_record))
+        (personal_home / "gateway.lock").write_text(json.dumps(legacy_record))
+
+        monkeypatch.setattr(status, "is_gateway_runtime_lock_active", lambda lock_path=None: True)
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+        assert status.get_running_pid() is None
+
+    def test_get_running_pid_keeps_legacy_records_without_home_hint(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "gateway.pid").write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 123,
+        }))
+
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+        assert status.acquire_gateway_runtime_lock() is True
+        try:
+            assert status.get_running_pid() == os.getpid()
+        finally:
+            status.release_gateway_runtime_lock()
 
     def test_write_pid_file_is_atomic_against_concurrent_writers(self, tmp_path, monkeypatch):
         """Regression: two concurrent --replace invocations must not both win.

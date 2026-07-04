@@ -361,6 +361,41 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     return True
 
 
+def _normalize_home_path(path: str | Path) -> Path:
+    return Path(path).expanduser().resolve(strict=False)
+
+
+def _record_belongs_to_gateway_home(
+    record: dict[str, Any],
+    expected_home: Path,
+) -> bool:
+    """Return True when runtime metadata belongs to ``expected_home``.
+
+    New records carry ``hermes_home``. Legacy records are accepted unless their
+    argv clearly points at a different ``.hermes*`` checkout.
+    """
+    expected = _normalize_home_path(expected_home)
+    recorded_home = record.get("hermes_home")
+    if isinstance(recorded_home, str) and recorded_home.strip():
+        return _normalize_home_path(recorded_home) == expected
+
+    argv = record.get("argv")
+    if not isinstance(argv, list):
+        return True
+
+    expected_text = str(expected)
+    for part in argv:
+        text = str(part)
+        if not text.startswith("/"):
+            continue
+        candidate = str(Path(text).expanduser().resolve(strict=False))
+        if "/.hermes" in candidate and not (
+            candidate == expected_text or candidate.startswith(expected_text + os.sep)
+        ):
+            return False
+    return True
+
+
 def _record_matches_live_gateway_pid(
     record: dict[str, Any],
     pid: int,
@@ -399,6 +434,7 @@ def _build_pid_record() -> dict:
         "kind": _GATEWAY_KIND,
         "argv": list(sys.argv),
         "start_time": _get_process_start_time(os.getpid()),
+        "hermes_home": str(get_hermes_home()),
     }
 
 
@@ -886,6 +922,10 @@ def get_runtime_status_running_pid(
     if not isinstance(payload, dict):
         return None
     if payload.get("gateway_state") in {None, "stopped", "startup_failed"}:
+        return None
+    if expected_home is not None and not _record_belongs_to_gateway_home(
+        payload, expected_home
+    ):
         return None
 
     pid = _pid_from_record(payload)
@@ -1398,7 +1438,9 @@ def get_running_pid(
     lock_active = is_gateway_runtime_lock_active(resolved_lock_path)
     if not lock_active:
         if pid_path is None:
-            runtime_pid = get_runtime_status_running_pid()
+            runtime_pid = get_runtime_status_running_pid(
+                expected_home=resolved_pid_path.parent
+            )
             if runtime_pid is not None:
                 return runtime_pid
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
@@ -1410,6 +1452,8 @@ def get_running_pid(
     for record in (primary_record, fallback_record):
         pid = _pid_from_record(record)
         if pid is None:
+            continue
+        if not _record_belongs_to_gateway_home(record, resolved_pid_path.parent):
             continue
 
         if not _pid_exists(pid):
