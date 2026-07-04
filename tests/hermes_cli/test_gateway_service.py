@@ -18,6 +18,26 @@ from gateway.restart import (
 )
 
 
+class TestServiceName:
+    def test_default_home_uses_backward_compatible_service_name(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: hermes_home)
+
+        assert gateway_cli.get_service_name() == "hermes-gateway"
+        assert gateway_cli.get_systemd_unit_path(system=False).name == "hermes-gateway.service"
+
+    def test_sibling_dot_hermes_home_uses_scoped_service_name(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes-iniuria"
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: hermes_home)
+
+        assert gateway_cli.get_service_name() == "hermes-gateway-iniuria"
+        assert gateway_cli.get_systemd_unit_path(system=False).name == "hermes-gateway-iniuria.service"
+
+
 class TestUserSystemdPrivateSocketPreflight:
     def test_preflight_accepts_private_socket_without_dbus_bus(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "_ensure_user_systemd_env", lambda: None)

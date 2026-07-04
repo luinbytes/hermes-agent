@@ -1670,8 +1670,9 @@ def _profile_suffix() -> str:
     """Derive a service-name suffix from the current HERMES_HOME.
 
     Returns ``""`` for the default root, the profile name for
-    ``<root>/profiles/<name>``, or a short hash for any other path.
-    Works correctly in Docker (HERMES_HOME=/opt/data) and standard deployments.
+    ``<root>/profiles/<name>``, the sibling suffix for ``~/.hermes-<name>``,
+    or a short hash for any other path. Works correctly in Docker
+    (HERMES_HOME=/opt/data) and standard deployments.
     """
     import hashlib
     import re
@@ -1679,6 +1680,14 @@ def _profile_suffix() -> str:
 
     home = get_hermes_home().resolve()
     default = get_default_hermes_root().resolve()
+    native_default = (Path.home() / ".hermes").resolve()
+    if home != native_default and home.parent == native_default.parent:
+        sibling_prefix = ".hermes-"
+        home_name = home.name
+        if home_name.startswith(sibling_prefix):
+            sibling = home_name[len(sibling_prefix) :]
+            if re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", sibling):
+                return sibling
     if home == default:
         return ""
     # Detect <root>/profiles/<name> pattern → use the profile name
